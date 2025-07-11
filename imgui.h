@@ -1,4 +1,4 @@
-// dear imgui, v1.92.1 WIP
+// dear imgui, v1.92.2 WIP
 // (headers)
 
 // Help:
@@ -28,8 +28,8 @@
 
 // Library Version
 // (Integer encoded as XYYZZ for use in #if preprocessor conditionals, e.g. '#if IMGUI_VERSION_NUM >= 12345')
-#define IMGUI_VERSION       "1.92.1 WIP"
-#define IMGUI_VERSION_NUM   19201
+#define IMGUI_VERSION       "1.92.2 WIP"
+#define IMGUI_VERSION_NUM   19211
 #define IMGUI_HAS_TABLE             // Added BeginTable() - from IMGUI_VERSION_NUM >= 18000
 #define IMGUI_HAS_TEXTURES          // Added ImGuiBackendFlags_RendererHasTextures - from IMGUI_VERSION_NUM >= 19198
 
@@ -317,7 +317,7 @@ IM_MSVC_RUNTIME_CHECKS_RESTORE
 // - When a Rendered Backend creates a texture, it store its native identifier into a ImTextureID value.
 //   (e.g. Used by DX11 backend to a `ID3D11ShaderResourceView*`; Used by OpenGL backends to store `GLuint`;
 //         Used by SDLGPU backend to store a `SDL_GPUTextureSamplerBinding*`, etc.).
-// - User may submit their own textures to e.g. ImGui::Image() function by passing the same type.
+// - User may submit their own textures to e.g. ImGui::Image() function by passing this value.
 // - During the rendering loop, the Renderer Backend retrieve the ImTextureID, which stored inside a
 //   ImTextureRef, which is stored inside a ImDrawCmd.
 // - Compile-time type configuration:
@@ -337,11 +337,12 @@ typedef ImU64 ImTextureID;      // Default: store up to 64-bits (any pointer or 
 #define ImTextureID_Invalid     ((ImTextureID)0)
 #endif
 
-// ImTextureRef = higher-level identifier for a texture.
+// ImTextureRef = higher-level identifier for a texture. Store a ImTextureID _or_ a ImTextureData*.
 // The identifier is valid even before the texture has been uploaded to the GPU/graphics system.
 // This is what gets passed to functions such as `ImGui::Image()`, `ImDrawList::AddImage()`.
 // This is what gets stored in draw commands (`ImDrawCmd`) to identify a texture during rendering.
 // - When a texture is created by user code (e.g. custom images), we directly stores the low-level ImTextureID.
+//   Because of this, when displaying your own texture you are likely to ever only manage ImTextureID values on your side.
 // - When a texture is created by the backend, we stores a ImTextureData* which becomes an indirection
 //   to extract the ImTextureID value during rendering, after texture upload has happened.
 // - There is no constructor to create a ImTextureID from a ImTextureData* as we don't expect this
@@ -3385,6 +3386,8 @@ struct ImDrawData
 // FOR ALL OTHER ImTextureXXXX TYPES: ONLY CORE LIBRARY AND RENDERER BACKENDS NEED TO KNOW AND CARE ABOUT THEM.
 //-----------------------------------------------------------------------------
 
+#undef Status // X11 headers are leaking this.
+
 // We intentionally support a limited amount of texture formats to limit burden on CPU-side code and extension.
 // Most standard backends only support RGBA32 but we provide a single channel option for low-resource/embedded systems.
 enum ImTextureFormat
@@ -3473,9 +3476,9 @@ struct ImFontConfig
     bool            MergeMode;              // false    // Merge into previous ImFont, so you can combine multiple inputs font into one ImFont (e.g. ASCII font + icons + Japanese glyphs). You may want to use GlyphOffset.y when merge font of different heights.
     bool            PixelSnapH;             // false    // Align every glyph AdvanceX to pixel boundaries. Useful e.g. if you are merging a non-pixel aligned font with the default font. If enabled, you can set OversampleH/V to 1.
     bool            PixelSnapV;             // true     // Align Scaled GlyphOffset.y to pixel boundaries.
-    ImS8            FontNo;                 // 0        // Index of font within TTF/OTF file
     ImS8            OversampleH;            // 0 (2)    // Rasterize at higher quality for sub-pixel positioning. 0 == auto == 1 or 2 depending on size. Note the difference between 2 and 3 is minimal. You can reduce this to 1 for large glyphs save memory. Read https://github.com/nothings/stb/blob/master/tests/oversample/README.md for details.
     ImS8            OversampleV;            // 0 (1)    // Rasterize at higher quality for sub-pixel positioning. 0 == auto == 1. This is not really useful as we don't use sub-pixel positions on the Y axis.
+    ImWchar         EllipsisChar;           // 0        // Explicitly specify Unicode codepoint of ellipsis character. When fonts are being merged first specified ellipsis will be used.
     float           SizePixels;             //          // Size in pixels for rasterizer (more or less maps to the resulting font height).
     const ImWchar*  GlyphRanges;            // NULL     // *LEGACY* THE ARRAY DATA NEEDS TO PERSIST AS LONG AS THE FONT IS ALIVE. Pointer to a user-provided list of Unicode range (2 value per range, values are inclusive, zero-terminated list).
     const ImWchar*  GlyphExcludeRanges;     // NULL     // Pointer to a small user-provided list of Unicode ranges (2 value per range, values are inclusive, zero-terminated list). This is very close to GlyphRanges[] but designed to exclude ranges from a font source, when merging fonts with overlapping glyphs. Use "Input Glyphs Overlap Detection Tool" to find about your overlapping ranges.
@@ -3484,11 +3487,11 @@ struct ImFontConfig
     float           GlyphMinAdvanceX;       // 0        // Minimum AdvanceX for glyphs, set Min to align font icons, set both Min/Max to enforce mono-space font. Absolute value for default size, other sizes will scale this value.
     float           GlyphMaxAdvanceX;       // FLT_MAX  // Maximum AdvanceX for glyphs
     float           GlyphExtraAdvanceX;     // 0        // Extra spacing (in pixels) between glyphs. Please contact us if you are using this. // FIXME-NEWATLAS: Intentionally unscaled
+    ImU32           FontNo;                 // 0        // Index of font within TTF/OTF file
     unsigned int    FontLoaderFlags;        // 0        // Settings for custom font builder. THIS IS BUILDER IMPLEMENTATION DEPENDENT. Leave as zero if unsure.
     //unsigned int  FontBuilderFlags;       // --       // [Renamed in 1.92] Ue FontLoaderFlags.
     float           RasterizerMultiply;     // 1.0f     // Linearly brighten (>1.0f) or darken (<1.0f) font output. Brightening small fonts may be a good workaround to make them more readable. This is a silly thing we may remove in the future.
     float           RasterizerDensity;      // 1.0f     // [LEGACY: this only makes sense when ImGuiBackendFlags_RendererHasTextures is not supported] DPI scale multiplier for rasterization. Not altering other font metrics: makes it easy to swap between e.g. a 100% and a 400% fonts for a zooming display, or handle Retina screen. IMPORTANT: If you change this it is expected that you increase/decrease font scale roughly to the inverse of this, otherwise quality may look lowered.
-    ImWchar         EllipsisChar;           // 0        // Explicitly specify Unicode codepoint of ellipsis character. When fonts are being merged first specified ellipsis will be used.
 
     // [Internal]
     ImFontFlags     Flags;                  // Font flags (don't use just yet, will be exposed in upcoming 1.92.X updates)
