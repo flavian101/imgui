@@ -1,11 +1,10 @@
 project "ImGui"
 	kind "StaticLib"
 	language "C++"
-    staticruntime "off"
+    staticruntime "on"
 
 	targetdir ("bin/" .. outputdir .. "/%{prj.name}")
 	objdir ("bin-int/" .. outputdir .. "/%{prj.name}")
-    defines{"IMGUI_API=__declspec(dllexport)"}
 
 	files
 	{
