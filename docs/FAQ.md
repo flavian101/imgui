@@ -19,7 +19,7 @@ or view this file with any Markdown viewer.
 | **[How can I tell whether to dispatch mouse/keyboard to Dear ImGui or my application?](#q-how-can-i-tell-whether-to-dispatch-mousekeyboard-to-dear-imgui-or-my-application)** |
 | [How can I enable keyboard or gamepad controls?](#q-how-can-i-enable-keyboard-or-gamepad-controls) |
 | [How can I use this on a machine without mouse, keyboard or screen? (input share, remote display)](#q-how-can-i-use-this-on-a-machine-without-mouse-keyboard-or-screen-input-share-remote-display) |
-| [How can I create my own backend?](q-how-can-i-create-my-own-backend)
+| [How can I create my own backend?](#q-how-can-i-create-my-own-backend)
 | [I integrated Dear ImGui in my engine and little squares are showing instead of text...](#q-i-integrated-dear-imgui-in-my-engine-and-little-squares-are-showing-instead-of-text) |
 | [I integrated Dear ImGui in my engine and some elements are clipping or disappearing when I move windows around...](#q-i-integrated-dear-imgui-in-my-engine-and-some-elements-are-clipping-or-disappearing-when-i-move-windows-around) |
 | [I integrated Dear ImGui in my engine and some elements are displaying outside their expected windows boundaries...](#q-i-integrated-dear-imgui-in-my-engine-and-some-elements-are-displaying-outside-their-expected-windows-boundaries) |
@@ -438,6 +438,8 @@ struct ImTextureRef
  - When a texture is created by user code (e.g. custom images), we directly store the low-level `ImTextureID`.
    - Because of this, when displaying your own texture you are likely to ever only manage ImTextureID values on your side.
  - When a texture is created by the backend, we store a `ImTextureData*` which becomes an indirection to extract the `ImTextureID` value during rendering, after texture upload has happened.
+ - To create a `ImTextureRef` from a `ImTextureData*` you can use `ImTextureData::GetTexRef()`.
+   We intentionally do not provide an `ImTextureRef` constructor for this: we don't expect this to be frequently useful to the end-user, and it would be erroneously called by many legacy code.
  - There is no constructor to create a `ImTextureRef` from a `ImTextureData*` as we don't expect this to be useful to the end-user, and it would be erroneously called by many legacy code.
  - If you want to bind the current atlas when using custom rectangles, you can use `io.Fonts->TexRef`.
  - Binding generators for languages such as C (which don't have constructors), should provide a helper, e.g. `inline ImTextureRef ImTextureRefFromID(ImTextureID tex_id) { ImTextureRef tex_ref = { ._TexData = NULL, .TexID = tex_id }; return tex_ref; }`

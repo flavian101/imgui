@@ -20,6 +20,10 @@
 
 // CHANGELOG
 // (minor and older changes stripped away, please see git history for details)
+//  2025-09-29: DirectX12: Rework synchronization logic. (#8961)
+//  2025-09-29: DirectX12: Enable swapchain tearing to eliminate viewports framerate throttling. (#8965)
+//  2025-09-29: DirectX12: Reuse a command list and allocator for texture uploads instead of recreating them each time. (#8963)
+//  2025-09-18: Call platform_io.ClearRendererHandlers() on shutdown.
 //  2025-06-19: Fixed build on MinGW. (#8702, #4594)
 //  2025-06-11: DirectX12: Added support for ImGuiBackendFlags_RendererHasTextures, for dynamic font atlas.
 //  2025-05-07: DirectX12: Honor draw_data->FramebufferScale to allow for custom backends and experiment using it (consistently with other renderer backends, even though in normal condition it is not set under Windows).
@@ -56,7 +60,7 @@
 
 // DirectX
 #include <d3d12.h>
-#include <dxgi1_4.h>
+#include <dxgi1_5.h>
 #include <d3dcompiler.h>
 #ifdef _MSC_VER
 #pragma comment(lib, "d3dcompiler") // Automatically link with d3dcompiler.lib as we are using D3DCompile() below.
@@ -86,6 +90,7 @@ struct ImGui_ImplDX12_Texture
 struct ImGui_ImplDX12_Data
 {
     ImGui_ImplDX12_InitInfo     InitInfo;
+    IDXGIFactory5*              pdxgiFactory;
     ID3D12Device*               pd3dDevice;
     ID3D12RootSignature*        pRootSignature;
     ID3D12PipelineState*        pPipelineState;
@@ -94,15 +99,20 @@ struct ImGui_ImplDX12_Data
     DXGI_FORMAT                 RTVFormat;
     DXGI_FORMAT                 DSVFormat;
     ID3D12DescriptorHeap*       pd3dSrvDescHeap;
+    ID3D12Fence*                Fence;
+    UINT64                      FenceLastSignaledValue;
+    HANDLE                      FenceEvent;
     UINT                        numFramesInFlight;
+    bool                        tearingSupport;
+    bool                        LegacySingleDescriptorUsed;
+
+    ID3D12CommandAllocator*     pTexCmdAllocator;
+    ID3D12GraphicsCommandList*  pTexCmdList;
 
     ImGui_ImplDX12_RenderBuffers* pFrameResources;
     UINT                        frameIndex;
 
-    ImGui_ImplDX12_Texture      FontTexture;
-    bool                        LegacySingleDescriptorUsed;
-
-    ImGui_ImplDX12_Data()       { memset((void*)this, 0, sizeof(*this)); frameIndex = UINT_MAX; }
+    ImGui_ImplDX12_Data()       { memset((void*)this, 0, sizeof(*this)); }
 };
 
 // Backend data stored in io.BackendRendererUserData to allow support for multiple Dear ImGui contexts
@@ -262,9 +272,8 @@ void ImGui_ImplDX12_RenderDrawData(ImDrawData* draw_data, ID3D12GraphicsCommandL
         return;
     ImDrawVert* vtx_dst = (ImDrawVert*)vtx_resource;
     ImDrawIdx* idx_dst = (ImDrawIdx*)idx_resource;
-    for (int n = 0; n < draw_data->CmdListsCount; n++)
+    for (const ImDrawList* draw_list : draw_data->CmdLists)
     {
-        const ImDrawList* draw_list = draw_data->CmdLists[n];
         memcpy(vtx_dst, draw_list->VtxBuffer.Data, draw_list->VtxBuffer.Size * sizeof(ImDrawVert));
         memcpy(idx_dst, draw_list->IdxBuffer.Data, draw_list->IdxBuffer.Size * sizeof(ImDrawIdx));
         vtx_dst += draw_list->VtxBuffer.Size;
@@ -295,9 +304,8 @@ void ImGui_ImplDX12_RenderDrawData(ImDrawData* draw_data, ID3D12GraphicsCommandL
     int global_idx_offset = 0;
     ImVec2 clip_off = draw_data->DisplayPos;
     ImVec2 clip_scale = draw_data->FramebufferScale;
-    for (int n = 0; n < draw_data->CmdListsCount; n++)
+    for (const ImDrawList* draw_list : draw_data->CmdLists)
     {
-        const ImDrawList* draw_list = draw_data->CmdLists[n];
         for (int cmd_i = 0; cmd_i < draw_list->CmdBuffer.Size; cmd_i++)
         {
             const ImDrawCmd* pcmd = &draw_list->CmdBuffer[cmd_i];
@@ -450,29 +458,15 @@ void ImGui_ImplDX12_UpdateTexture(ImTextureData* tex)
         props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
         props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 
-        // FIXME-OPT: Can upload buffer be reused?
+        // FIXME-OPT: Could upload buffer be kept around, reused, and grown only when needed? Would that be worth it?
         ID3D12Resource* uploadBuffer = nullptr;
         HRESULT hr = bd->pd3dDevice->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc,
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer));
         IM_ASSERT(SUCCEEDED(hr));
 
-        // Create temporary command list and execute immediately
-        ID3D12Fence* fence = nullptr;
-        hr = bd->pd3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
-        IM_ASSERT(SUCCEEDED(hr));
-
-        HANDLE event = ::CreateEvent(0, 0, 0, 0);
-        IM_ASSERT(event != nullptr);
-
-        // FIXME-OPT: Create once and reuse?
-        ID3D12CommandAllocator* cmdAlloc = nullptr;
-        hr = bd->pd3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdAlloc));
-        IM_ASSERT(SUCCEEDED(hr));
-
-        // FIXME-OPT: Can be use the one from user? (pass ID3D12GraphicsCommandList* to ImGui_ImplDX12_UpdateTextures)
-        ID3D12GraphicsCommandList* cmdList = nullptr;
-        hr = bd->pd3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdAlloc, nullptr, IID_PPV_ARGS(&cmdList));
-        IM_ASSERT(SUCCEEDED(hr));
+        bd->pTexCmdAllocator->Reset();
+        bd->pTexCmdList->Reset(bd->pTexCmdAllocator, nullptr);
+        ID3D12GraphicsCommandList* cmdList = bd->pTexCmdList;
 
         // Copy to upload buffer
         void* mapped = nullptr;
@@ -527,20 +521,16 @@ void ImGui_ImplDX12_UpdateTexture(ImTextureData* tex)
 
         ID3D12CommandQueue* cmdQueue = bd->pCommandQueue;
         cmdQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&cmdList);
-        hr = cmdQueue->Signal(fence, 1);
+        hr = cmdQueue->Signal(bd->Fence, ++bd->FenceLastSignaledValue);
         IM_ASSERT(SUCCEEDED(hr));
 
         // FIXME-OPT: Suboptimal?
         // - To remove this may need to create NumFramesInFlight x ImGui_ImplDX12_FrameContext in backend data (mimick docking version)
         // - Store per-frame in flight: upload buffer?
         // - Where do cmdList and cmdAlloc fit?
-        fence->SetEventOnCompletion(1, event);
-        ::WaitForSingleObject(event, INFINITE);
+        bd->Fence->SetEventOnCompletion(bd->FenceLastSignaledValue, bd->FenceEvent);
+        ::WaitForSingleObject(bd->FenceEvent, INFINITE);
 
-        cmdList->Release();
-        cmdAlloc->Release();
-        ::CloseHandle(event);
-        fence->Release();
         uploadBuffer->Release();
         tex->SetStatus(ImTextureStatus_OK);
     }
@@ -556,6 +546,13 @@ bool    ImGui_ImplDX12_CreateDeviceObjects()
         return false;
     if (bd->pPipelineState)
         ImGui_ImplDX12_InvalidateDeviceObjects();
+
+    HRESULT hr = ::CreateDXGIFactory1(IID_PPV_ARGS(&bd->pdxgiFactory));
+    IM_ASSERT(hr == S_OK);
+
+    BOOL allow_tearing = FALSE;
+    bd->pdxgiFactory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow_tearing, sizeof(allow_tearing));
+    bd->tearingSupport = (allow_tearing == TRUE);
 
     // Create the root signature
     {
@@ -580,26 +577,26 @@ bool    ImGui_ImplDX12_CreateDeviceObjects()
         param[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         // Bilinear sampling is required by default. Set 'io.Fonts->Flags |= ImFontAtlasFlags_NoBakedLines' or 'style.AntiAliasedLinesUseTex = false' to allow point/nearest sampling.
-        D3D12_STATIC_SAMPLER_DESC staticSampler = {};
-        staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        staticSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSampler.MipLODBias = 0.f;
-        staticSampler.MaxAnisotropy = 0;
-        staticSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-        staticSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-        staticSampler.MinLOD = 0.f;
-        staticSampler.MaxLOD = D3D12_FLOAT32_MAX;
-        staticSampler.ShaderRegister = 0;
-        staticSampler.RegisterSpace = 0;
-        staticSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC staticSampler[1] = {};
+        staticSampler[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        staticSampler[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        staticSampler[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        staticSampler[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        staticSampler[0].MipLODBias = 0.f;
+        staticSampler[0].MaxAnisotropy = 0;
+        staticSampler[0].ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        staticSampler[0].BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+        staticSampler[0].MinLOD = 0.f;
+        staticSampler[0].MaxLOD = D3D12_FLOAT32_MAX;
+        staticSampler[0].ShaderRegister = 0;
+        staticSampler[0].RegisterSpace = 0;
+        staticSampler[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC desc = {};
         desc.NumParameters = _countof(param);
         desc.pParameters = param;
         desc.NumStaticSamplers = 1;
-        desc.pStaticSamplers = &staticSampler;
+        desc.pStaticSamplers = &staticSampler[0];
         desc.Flags =
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
             D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
@@ -778,6 +775,20 @@ bool    ImGui_ImplDX12_CreateDeviceObjects()
     if (result_pipeline_state != S_OK)
         return false;
 
+    // Create command allocator and command list for ImGui_ImplDX12_UpdateTexture()
+    hr = bd->pd3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&bd->pTexCmdAllocator));
+    IM_ASSERT(SUCCEEDED(hr));
+    hr = bd->pd3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, bd->pTexCmdAllocator, nullptr, IID_PPV_ARGS(&bd->pTexCmdList));
+    IM_ASSERT(SUCCEEDED(hr));
+    hr = bd->pTexCmdList->Close();
+    IM_ASSERT(SUCCEEDED(hr));
+
+    // Create fence.
+    hr = bd->pd3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&bd->Fence));
+    IM_ASSERT(hr == S_OK);
+    bd->FenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    IM_ASSERT(bd->FenceEvent != nullptr);
+
     return true;
 }
 
@@ -787,11 +798,17 @@ void    ImGui_ImplDX12_InvalidateDeviceObjects()
     if (!bd || !bd->pd3dDevice)
         return;
 
+    SafeRelease(bd->pdxgiFactory);
     if (bd->commandQueueOwned)
         SafeRelease(bd->pCommandQueue);
     bd->commandQueueOwned = false;
     SafeRelease(bd->pRootSignature);
     SafeRelease(bd->pPipelineState);
+    SafeRelease(bd->pTexCmdList);
+    SafeRelease(bd->pTexCmdAllocator);
+    SafeRelease(bd->Fence);
+    CloseHandle(bd->FenceEvent);
+    bd->FenceEvent = nullptr;
 
     // Destroy all textures
     for (ImTextureData* tex : ImGui::GetPlatformIO().Textures)
@@ -846,6 +863,7 @@ bool ImGui_ImplDX12_Init(ImGui_ImplDX12_InitInfo* init_info)
     bd->DSVFormat = init_info->DSVFormat;
     bd->numFramesInFlight = init_info->NumFramesInFlight;
     bd->pd3dSrvDescHeap = init_info->SrvDescriptorHeap;
+    bd->tearingSupport = false;
 
     io.BackendRendererUserData = (void*)bd;
     io.BackendRendererName = "imgui_impl_dx12";
@@ -908,14 +926,15 @@ void ImGui_ImplDX12_Shutdown()
     ImGui_ImplDX12_Data* bd = ImGui_ImplDX12_GetBackendData();
     IM_ASSERT(bd != nullptr && "No renderer backend to shutdown, or already shutdown?");
     ImGuiIO& io = ImGui::GetIO();
+    ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
 
-    // Clean up windows and device objects
     ImGui_ImplDX12_InvalidateDeviceObjects();
     delete[] bd->pFrameResources;
 
     io.BackendRendererName = nullptr;
     io.BackendRendererUserData = nullptr;
     io.BackendFlags &= ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures);
+    platform_io.ClearRendererHandlers();
     IM_DELETE(bd);
 }
 
