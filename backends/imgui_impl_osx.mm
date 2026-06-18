@@ -13,7 +13,7 @@
 //  [x] Platform: Multi-viewport / platform windows.
 // Missing features or Issues:
 //  [ ] Platform: Multi-viewport: Window size not correctly reported when enabling io.ConfigViewportsNoDecoration
-//  [ ] Platform: Multi-viewport: Missing ImGuiBackendFlags_HasParentViewportId support. The viewport->ParentViewportID field is ignored, and therefore io.ConfigViewportsNoDefaultParent has no effect either.
+//  [ ] Platform: Multi-viewport: Missing ImGuiBackendFlags_HasParentViewport support. The viewport->ParentViewportID field is ignored, and therefore io.ConfigViewportsNoDefaultParent has no effect either.
 
 // You can use unmodified imgui_impl_* files in your project. See examples/ folder for examples of using this.
 // Prefer including the entire imgui/ repository into your project (either as a copy or as a submodule), and only build the backends you need.
@@ -33,7 +33,7 @@
 
 // CHANGELOG
 // (minor and older changes stripped away, please see git history for details)
-//  2025-XX-XX: Added support for multiple windows via the ImGuiPlatformIO interface.
+//  2026-XX-XX: Added support for multiple windows via the ImGuiPlatformIO interface.
 //  2025-09-18: Call platform_io.ClearPlatformHandlers() on shutdown.
 //  2025-07-08: [Docking] Fixed multi-viewport handling broken on 2025-06-02. (#8644, #8777)
 //  2025-06-27: Added ImGuiMouseCursor_Wait and ImGuiMouseCursor_Progress mouse cursor support.
